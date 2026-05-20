@@ -1,4 +1,5 @@
-
+#Deze code maakt een lens aan via differentiabel renderen. 
+#Het is zeer sterk gebaseerd op de code van Wenzel Jakob, te vinden op deze link https://mitsuba.readthedocs.io/en/stable/src/inverse_rendering/caustics_optimization.html
 import os
 from os.path import realpath, join
 
