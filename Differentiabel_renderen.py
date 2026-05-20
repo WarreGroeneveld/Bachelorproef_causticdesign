@@ -1,0 +1,459 @@
+
+import os
+from os.path import realpath, join
+
+import drjit as dr
+import mitsuba as mi
+script_dir = os.path.dirname(os.path.abspath(__file__))
+mi.set_variant('llvm_ad_rgb')
+mi.Thread.thread().file_resolver().append(script_dir)
+
+SCENE_DIR = realpath('../scenes')
+
+CONFIGS = {
+    'wave': {
+        'emitter': 'gray',
+        'reference': join(SCENE_DIR, r"C:\Users\warre\Desktop\Bachelorproef\Sterrennacht.jpg"),
+    },
+    'sunday': {
+        'emitter': 'bayer',
+        'reference': join(SCENE_DIR, r'C:\Users\warre\Desktop\Bachelorproef\testfoto_highcontrast_grayscale.png'),
+    },#dit laat toe om een kleurafbeelding te renderen aan de hand van een bayer patroon emitter,
+    #dit is geen realistische lichtbron, dus is het niet in de thesis gebruikt, maar toch interessant om mee te experimenteren
+}
+
+config_name = 'wave'
+
+
+config = CONFIGS[config_name]
+print('[i] Reference image selected:', config['reference'])
+mi.Bitmap(config['reference'])
+if 'PYTEST_CURRENT_TEST' not in os.environ:
+    config.update({
+        'render_resolution': (250, 200),
+        'heightmap_resolution': (250, 200),
+        'n_upsampling_steps': 4,
+        'spp': 16,
+        'max_iterations': 1000,
+        'learning_rate': 3e-5,
+    })
+else:
+    # IGNORE THIS: When running under pytest, adjust parameters to reduce computation time
+    config.update({
+        'render_resolution': (64, 64),
+        'heightmap_resolution': (128, 128),
+        'n_upsampling_steps': 0,
+        'spp': 8,
+        'max_iterations': 25,
+        'learning_rate': 3e-5,
+    })
+
+
+output_dir = realpath(join('.', 'outputs', config_name))
+os.makedirs(output_dir, exist_ok=True)
+print('[i] Results will be saved to:', output_dir)
+
+# Make sure that resources from the scene directory can be found
+mi.file_resolver().append(SCENE_DIR)
+
+def create_flat_lens_mesh(resolution):
+    # Generate UV coordinates
+    U, V = dr.meshgrid(
+        dr.linspace(mi.Float, 0, 1, resolution[0]),
+        dr.linspace(mi.Float, 0, 1, resolution[1]),
+        indexing='ij'
+    )
+    texcoords = mi.Vector2f(U, V)
+
+    # Generate vertex coordinates
+    X = 2.0 * (U - 0.5)
+    Y = 2.0 * (V - 0.5)
+    vertices = mi.Vector3f(X, Y, 0.0)
+
+    faces_x, faces_y, faces_z = [], [], []
+    for i in range(resolution[0] - 1):
+        for j in range(resolution[1] - 1):
+            v00 = i * resolution[1] + j
+            v01 = v00 + 1
+            v10 = (i + 1) * resolution[1] + j
+            v11 = v10 + 1
+            faces_x.extend([v00, v01])
+            faces_y.extend([v10, v10])
+            faces_z.extend([v01, v11])
+
+    # Assemble face buffer
+    faces = mi.Vector3u(faces_x, faces_y, faces_z)
+
+    # Instantiate the mesh object
+    mesh = mi.Mesh("lens-mesh", resolution[0] * resolution[1], len(faces_x), has_vertex_texcoords=True)
+
+    # Set its buffers
+    mesh_params = mi.traverse(mesh)
+    mesh_params['vertex_positions'] = dr.ravel(vertices)
+    mesh_params['vertex_texcoords'] = dr.ravel(texcoords)
+    mesh_params['faces'] = dr.ravel(faces)
+    mesh_params.update()
+
+    return mesh
+
+lens_res = config.get('lens_res', config['heightmap_resolution'])
+lens_fname = join(output_dir, 'lens_{}_{}.ply'.format(*lens_res))
+
+if not os.path.isfile(lens_fname):
+    m = create_flat_lens_mesh(lens_res)
+    m.write_ply(lens_fname)
+    print('[+] Wrote lens mesh ({}x{} tesselation) file to: {}'.format(*lens_res, lens_fname))
+
+emitter = None
+if config['emitter'] == 'gray':
+    emitter = {
+        'type':'directionalarea',
+        'radiance': {
+            'type': 'spectrum',
+            'value': 0.8
+        },
+    }
+elif config['emitter'] == 'bayer':
+    bayer = dr.zeros(mi.TensorXf, (32, 32, 3))
+    bayer[ ::2,  ::2, 2] = 2.2
+    bayer[ ::2, 1::2, 1] = 2.2
+    bayer[1::2, 1::2, 0] = 2.2
+
+    emitter = {
+        'type':'directionalarea',
+        'radiance': {
+            'type': 'bitmap',
+            'bitmap': mi.Bitmap(bayer),
+            'raw': True,
+            'filter_type': 'nearest'
+        },
+    }
+
+integrator = {
+    'type': 'ptracer',
+    'samples_per_pass': 256,
+    'max_depth': 4,
+    'hide_emitters': False,
+}
+
+# Looking at the receiving plane, not looking through the lens
+sensor_to_world = mi.ScalarTransform4f().look_at(
+    target=[0, -20, 0],
+    origin=[0, -4.65, 0],
+    up=[0, 0, 1]
+)
+resx, resy = config['render_resolution']
+sensor = {
+    'type': 'perspective',
+    'near_clip': 1,
+    'far_clip': 1000,
+    'fov': 45,
+    'to_world': sensor_to_world,
+
+    'sampler': {
+        'type': 'independent',
+        'sample_count': 512  # Not really used
+    },
+    'film': {
+        'type': 'hdrfilm',
+        'width': resx,
+        'height': resy,
+        'pixel_format': 'rgb',
+        'rfilter': {
+            # Important: smooth reconstruction filter with a footprint larger than 1 pixel.
+            'type': 'gaussian'
+        }
+    },
+}
+# Laad de mesh expliciet in het geheugen
+
+scene = {
+    'type': 'scene',
+    'sensor': sensor,
+    'integrator': integrator,
+    # Glass BSDF
+    'simple-glass': {
+        'type': 'dielectric',
+        'id': 'simple-glass-bsdf',
+        'ext_ior': 'air',
+        'int_ior': 1.5,
+        'specular_reflectance': { 'type': 'spectrum', 'value': 0 },
+    },
+    'white-bsdf': {
+        'type': 'diffuse',
+        'id': 'white-bsdf',
+        'reflectance': { 'type': 'rgb', 'value': (1, 1, 1) },
+    },
+    'black-bsdf': {
+        'type': 'diffuse',
+        'id': 'black-bsdf',
+        'reflectance': { 'type': 'spectrum', 'value': 0 },
+    },
+    # Receiving plane (Nu een ingebouwde 'rectangle')
+    'receiving-plane': {
+        'type': 'rectangle',
+        'id': 'receiving-plane',
+        'to_world': \
+            mi.ScalarTransform4f().look_at(
+                target=[0, 1, 0],
+                origin=[0, -7, 0],
+                up=[0, 0, 1]
+            ).scale((5, 5, 5)),
+        'bsdf': {'type': 'ref', 'id': 'white-bsdf'},
+    },
+    # Glass slab (Nu een ingebouwde 'cube' die we platdrukken tot een plaat)
+    'slab': {
+        'type': 'obj',
+        'id': 'slab',
+        'filename': r"C:\Users\warre\Desktop\Bachelorproef\slab.obj",
+        'to_world': mi.ScalarTransform4f().rotate(axis=(1, 0, 0), angle=90),
+        'bsdf': {'type': 'ref', 'id': 'simple-glass'},
+    },
+    # Glass rectangle, to be optimized (Deze genereert hij zelf met je functie, dus dit is prima)
+    'lens': {
+        'type': 'ply',
+        'id': 'lens',
+        'filename': lens_fname, # Hier moet hij staan
+        'to_world': mi.ScalarTransform4f().rotate(axis=(1, 0, 0), angle=90),
+        'bsdf': {'type': 'ref', 'id': 'simple-glass'},
+    },
+    # Directional area emitter (Nu ook een ingebouwde 'rectangle')
+    'focused-emitter-shape': {
+        'type': 'rectangle',
+        'to_world': mi.ScalarTransform4f().look_at(
+            target=[0, 0, 0],
+            origin=[0, 5, 0],
+            up=[0, 0, 1]
+        ),
+        'bsdf': {'type': 'ref', 'id': 'black-bsdf'},
+        'focused-emitter': emitter,
+    },
+}
+scene = mi.load_dict(scene)
+
+def load_ref_image(config, resolution, output_dir):
+    b = mi.Bitmap(config['reference'])
+    b = b.convert(mi.Bitmap.PixelFormat.RGB, mi.Bitmap.Float32, False)
+    if dr.any(b.size() != resolution):
+        b = b.resample(resolution)
+
+    mi.util.write_bitmap(join(output_dir, 'out_ref.exr'), b)
+
+    print('[i] Loaded reference image from:', config['reference'])
+    return mi.TensorXf(b)
+
+# Make sure the reference image will have a resolution matching the sensor
+sensor = scene.sensors()[0]
+crop_size = sensor.film().crop_size()
+image_ref = load_ref_image(config, crop_size, output_dir=output_dir)
+
+
+image_ref = image_ref
+
+
+mi.util.write_bitmap(join(output_dir, 'out_ref_target.exr'), image_ref)
+
+initial_heightmap_resolution = [r // (2 ** config['n_upsampling_steps'])
+                                for r in config['heightmap_resolution']]
+upsampling_steps = dr.square(dr.linspace(mi.Float, 0, 1, config['n_upsampling_steps']+1, endpoint=False).numpy()[1:])
+upsampling_steps = (config['max_iterations'] * upsampling_steps).astype(int)
+print('The resolution of the heightfield will be doubled at iterations:', upsampling_steps)
+
+heightmap_texture = mi.load_dict({
+    'type': 'bitmap',
+    'id': 'heightmap_texture',
+    'bitmap': mi.Bitmap(dr.zeros(mi.TensorXf, initial_heightmap_resolution)),
+    'raw': True,
+})
+
+# Actually optimized: the heightmap texture
+params = mi.traverse(heightmap_texture)
+params.keep(['data'])
+opt = mi.ad.Adam(lr=config['learning_rate'], params=params)
+
+params_scene = mi.traverse(scene)
+
+positions_initial = dr.unravel(mi.Vector3f, params_scene['lens.vertex_positions'])
+normals_initial   = dr.unravel(mi.Vector3f, params_scene['lens.vertex_normals'])
+
+lens_si = dr.zeros(mi.SurfaceInteraction3f, dr.width(positions_initial))
+lens_si.uv = dr.unravel(type(lens_si.uv), params_scene['lens.vertex_texcoords'])
+
+def apply_displacement(amplitude = 1.):
+    vmax = 1 / 100.
+    params['data'] = dr.clip(params['data'], -vmax, vmax)
+    dr.enable_grad(params['data'])
+    params.update()
+
+    height_values = heightmap_texture.eval_1(lens_si)
+    new_positions = (height_values * normals_initial * amplitude + positions_initial)
+    params_scene['lens.vertex_positions'] = dr.ravel(new_positions)
+    params_scene.update()
+
+def scale_independent_loss(image, ref, blur_factor=2):
+
+    h, w, c = image.shape
+    
+    blurred_image = image
+    blurred_ref = ref
+
+    scaled_image = blurred_image / dr.mean(dr.detach(blurred_image))
+    scaled_ref = blurred_ref / dr.mean(blurred_ref)
+    
+    return dr.mean(dr.square(scaled_image - scaled_ref))
+
+def curvature_loss(heightmap): #niet in thesis gebruikt, maar om de ruwheid van het oppervlak te verminderen
+
+    center = heightmap[1:-1, 1:-1]
+    up     = heightmap[:-2, 1:-1]
+    down   = heightmap[2:,  1:-1]
+    left   = heightmap[1:-1, :-2]
+    right  = heightmap[1:-1, 2:]
+    
+    # Bereken de laplaciaan
+    laplacian = up + down + left + right - (4.0 * center)
+    
+    
+    return dr.mean(dr.square(laplacian))
+
+import time
+start_time = time.time()
+mi.set_log_level(mi.LogLevel.Warn)
+iterations = config['max_iterations']
+loss_values = []
+spp = config['spp']
+
+for it in range(iterations):
+    t0 = time.time()
+
+    # Apply displacement and update the scene BHV accordingly
+    apply_displacement()
+
+    # Perform a differentiable rendering of the scene
+    image = mi.render(scene, params, seed=it, spp=2 * spp, spp_grad=spp)
+
+    
+
+    loss_image = scale_independent_loss(image, image_ref)
+    
+    loss_tv = curvature_loss(params['data'])
+    
+
+    tv_weight = 0 #hoe hoger de waarde, hoe zwaarder je ruwheid afstraft, moet op ongeveer 0.01 om een echt verschil te maken
+    loss = loss_image + (tv_weight * loss_tv)
+
+    # Back-propagate errors to input parameters and take an optimizer step
+    dr.backward(loss)
+    # Take a gradient step
+    opt.step()
+
+    # Increase resolution of the heightmap
+    if it in upsampling_steps:
+
+        h, w, c = opt['data'].shape
+        opt['data'] = dr.resample(opt['data'], shape=(h * 2, w * 2, c))
+
+    # Carry over the update to our "latent variable" (the heightmap values)
+    params.update(opt)
+
+    # Log progress
+    elapsed_ms = 1000. * (time.time() - t0)
+    current_loss = loss.array[0]
+    loss_values.append(current_loss)
+    mi.logger().log_progress(
+        it / (iterations - 1),
+        f'Loss: {current_loss:.6f} | Time: {elapsed_ms:.0f}ms',
+        f'{it+1} ', 
+        ''
+    )
+
+
+    # Increase rendering quality toward the end of the optimization
+    if it in (int(0.7 * iterations), int(0.9 * iterations)):
+        spp *= 2
+        opt.set_learning_rate(0.5 * opt.learning_rate())
+
+
+end_time = time.time()
+print(((end_time - start_time) * 1000) / iterations, ' ms per iteration on average')
+mi.set_log_level(mi.LogLevel.Info)
+
+mi.set_log_level(mi.LogLevel.Error)
+fname = join(output_dir, 'heightmap_final.exr')
+mi.util.write_bitmap(fname, params['data'])
+print('[+] Saved final heightmap state to:', os.path.basename(fname))
+
+fname = join(output_dir, 'lens_displaced.ply')
+apply_displacement()
+
+
+lens_mesh = None
+for m in scene.shapes():
+    try:
+        if hasattr(m, 'vertex_count') and m.vertex_count() > 100:
+            lens_mesh = m
+            break
+    except Exception:
+        pass
+
+if lens_mesh is not None:
+    lens_mesh.write_ply(fname)
+    print('[+] Saved displaced lens to:', os.path.basename(fname))
+else:
+    print('[-] WAARSCHUWING: Kon de lens mesh niet opslaan (niet gevonden).')
+fname_render = join(output_dir, 'final_render.png')
+mi.util.write_bitmap(fname_render, image)
+print(f'[+] Saved final render image to: {os.path.basename(fname_render)}')
+
+heightmap_data = params['data']
+h_min = dr.min(heightmap_data)
+h_max = dr.max(heightmap_data)
+
+heightmap_normalized = (heightmap_data - h_min) / (h_max - h_min)
+
+
+fname_heightmap_png = join(output_dir, 'heightmap_visual.png')
+
+mi.util.write_bitmap(fname_heightmap_png, heightmap_normalized)
+print(f'[+] Saved visual heightmap to: {os.path.basename(fname_heightmap_png)}')
+import matplotlib.pyplot as plt
+
+def show_image(ax, img, title):
+    ax.imshow(mi.util.convert_to_bitmap(img))
+    ax.axis('off')
+    ax.set_title(title)
+
+def show_heightmap(fig, ax, values, title):
+    im = ax.imshow(values.squeeze(), vmax=1e-4)
+    fig.colorbar(im, ax=ax)
+    ax.axis('off')
+    ax.set_title(title)
+
+fig, ax = plt.subplots(2, 2, figsize=(11, 10))
+ax = ax.ravel()
+ax[0].plot(loss_values)
+ax[0].set_xlabel('Iteration'); ax[0].set_ylabel('Loss value'); ax[0].set_title('Convergence plot')
+
+show_heightmap(fig, ax[1], params['data'].numpy(), 'Final heightmap')
+show_image(ax[2], image_ref, 'Reference')
+show_image(ax[3], image,     'Final state')
+plt.show()
+schaalfactor_mm = 50.0 
+
+heightmap_numpy = params['data'].numpy()
+
+max_hoogte_eenheid = heightmap_numpy.max()
+min_hoogte_eenheid = heightmap_numpy.min()
+
+max_hoogte_mm = max_hoogte_eenheid * schaalfactor_mm
+min_hoogte_mm = min_hoogte_eenheid * schaalfactor_mm
+totaal_verschil_mm = max_hoogte_mm - min_hoogte_mm
+
+print("\n" + "="*45)
+print(" 🛠️ FYSIEKE LENS SPECIFICATIES (Voor 10x10 cm)")
+print("="*45)
+print(f"Ideale projectieafstand:   350.0 mm (35 cm)")
+print(f"Hoogste piek (t.o.v. vlak): {max_hoogte_mm:7.3f} mm")
+print(f"Diepste dal (t.o.v. vlak):  {min_hoogte_mm:7.3f} mm")
+print(f"Totaal hoogteverschil:      {totaal_verschil_mm:7.3f} mm")
+print("="*45 + "\n")
