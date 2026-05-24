@@ -52,7 +52,6 @@ else:
     dy_phi, dx_phi = np.gradient(Phi, pixel_grootte)
     
     schaal = max_verschuiving / (np.max(np.sqrt(dx_phi**2 + dy_phi**2)) or 1)
-    print(schaal)
     Dx, Dy = dx_phi * schaal, dy_phi * schaal
 
     x_as = np.linspace(-lens_breedte/2, lens_breedte/2, w_grid)
