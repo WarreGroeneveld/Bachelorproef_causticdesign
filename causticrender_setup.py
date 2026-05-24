@@ -64,7 +64,7 @@ sensor_to_world = mi.ScalarTransform4f().look_at(
 
 
 
-print(f"muur locatie : {pivot}")
+print(f"muur locatie         : {pivot}")
 
 
 print(f"camera locatie       : {nieuwe_camera_origin}")
@@ -72,11 +72,11 @@ print(f"camera kijkt naar    : {pivot}")
 
 lens_pos = lens_to_world @ [0.0, 0.0, 0.0]
 lens_pos_list = [lens_pos.x, lens_pos.y, lens_pos.z]
-print(f"[-] lens locatie         : [ {lens_pos_list[0]:.4f},  {lens_pos_list[1]:.4f},  {lens_pos_list[2]:.4f} ]")
+print(f"lens locatie         : [ {lens_pos_list[0]:.4f},  {lens_pos_list[1]:.4f},  {lens_pos_list[2]:.4f} ]")
 
 
 licht_richting_list = [nieuwe_licht_richting.x, nieuwe_licht_richting.y, nieuwe_licht_richting.z]
-print(f"richting licht : [ {licht_richting_list[0]:.4f},  {licht_richting_list[1]:.4f},  {licht_richting_list[2]:.4f} ]")
+print(f"richting licht       : [ {licht_richting_list[0]:.4f},  {licht_richting_list[1]:.4f},  {licht_richting_list[2]:.4f} ]")
 
 scene_dict = {
     'type': 'scene',
