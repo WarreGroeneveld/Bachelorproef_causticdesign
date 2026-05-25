@@ -442,19 +442,3 @@ plt.show()
 schaalfactor_mm = 50.0 
 
 heightmap_numpy = params['data'].numpy()
-
-max_hoogte_eenheid = heightmap_numpy.max()
-min_hoogte_eenheid = heightmap_numpy.min()
-
-max_hoogte_mm = max_hoogte_eenheid * schaalfactor_mm
-min_hoogte_mm = min_hoogte_eenheid * schaalfactor_mm
-totaal_verschil_mm = max_hoogte_mm - min_hoogte_mm
-
-print("\n" + "="*45)
-print(" 🛠️ FYSIEKE LENS SPECIFICATIES (Voor 10x10 cm)")
-print("="*45)
-print(f"Ideale projectieafstand:   350.0 mm (35 cm)")
-print(f"Hoogste piek (t.o.v. vlak): {max_hoogte_mm:7.3f} mm")
-print(f"Diepste dal (t.o.v. vlak):  {min_hoogte_mm:7.3f} mm")
-print(f"Totaal hoogteverschil:      {totaal_verschil_mm:7.3f} mm")
-print("="*45 + "\n")
