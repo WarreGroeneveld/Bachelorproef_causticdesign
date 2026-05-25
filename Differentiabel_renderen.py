@@ -24,8 +24,6 @@ CONFIGS = {
 }
 
 config_name = 'wave'
-
-
 config = CONFIGS[config_name]
 print('[i] Reference image selected:', config['reference'])
 mi.Bitmap(config['reference'])
